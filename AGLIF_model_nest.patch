@@ -1,0 +1,1649 @@
+diff --git a/models/CMakeLists.txt b/models/CMakeLists.txt
+index 01012b56a..37fb79c10 100644
+--- a/models/CMakeLists.txt
++++ b/models/CMakeLists.txt
+@@ -78,6 +78,7 @@ set( models_sources
+     iaf_psc_exp_ps.cpp iaf_psc_exp_ps.h
+     iaf_psc_exp_ps_lossless.cpp iaf_psc_exp_ps_lossless.h
+     izhikevich.h izhikevich.cpp
++    migliore.h migliore.cpp
+     jonke_synapse.h
+     lin_rate.h lin_rate.cpp
+     mat2_psc_exp.h mat2_psc_exp.cpp
+diff --git a/models/migliore.cpp b/models/migliore.cpp
+new file mode 100644
+index 000000000..ba597ea27
+--- /dev/null
++++ b/models/migliore.cpp
+@@ -0,0 +1,1033 @@
++/*
++ *  migliore.cpp
++ *
++ *  This file is part of NEST.
++ *
++ *  Copyright (C) 2004 The NEST Initiative
++ *
++ *  NEST is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, either version 2 of the License, or
++ *  (at your option) any later version.
++ *
++ *  NEST is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ *  GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License
++ *  along with NEST.  If not, see <http://www.gnu.org/licenses/>.
++ *
++ */
++
++#include "migliore.h"
++
++// C++ includes:
++#include <limits>
++
++// Includes from libnestutil:
++#include "dict_util.h"
++#include "numerics.h"
++#include "propagator_stability.h"
++
++// Includes from nestkernel:
++//#include "event_delivery_manager_impl.h"
++#include "exceptions.h"
++#include "kernel_manager.h"
++#include "universal_data_logger_impl.h"
++
++// Includes from sli:
++#include "dict.h"
++#include "dictutils.h"
++#include "doubledatum.h"
++#include "integerdatum.h"
++
++/* ----------------------------------------------------------------
++ * Recordables map
++ * ---------------------------------------------------------------- */
++
++//nest::RecordablesMap< nest::migliore > nest::migliore::recordablesMap_;
++
++namespace nest
++{
++  // Override the create() method with one call to RecordablesMap::insert_()
++  // for each quantity to be recorded.
++  template <>
++  void
++  DynamicRecordablesMap< migliore >::create( migliore& host )
++  {
++    // use standard names wherever you can for consistency!
++    insert( names::V_m, host.get_data_access_functor( migliore::State_::V_M ) );
++    //    insert( names::I, host.get_data_access_functor( migliore::State_::I ) );
++    insert( names::I_syn, host.get_data_access_functor( migliore::State_::I_ve ) );
++
++    insert( names::Iadap_ini, host.get_data_access_functor( migliore::State_::Iadap ) );
++    insert( names::Idep_ini, host.get_data_access_functor( migliore::State_::Idep ) );
++
++    host.insert_current_recordables();
++  }
++  // void
++  // RecordablesMap< migliore >::create()
++  // {
++  //   // use standard names whereever you can for consistency!
++  //   insert_( names::V_m, &migliore::get_V_m_ );
++  //   insert_( names::I, &migliore::get_I_inj_ );
++  //   insert_( names::init_sign, &migliore::get_init_sign_ );
++  //   insert_( names::Iadap_ini, &migliore::get_Iadap_ini_ );
++  //   insert_( names::Idep_ini, &migliore::get_Idep_ini_ );
++  //   insert_( names::sis, &migliore::get_sis_ );
++  //   insert_( names::I_syn, &migliore::get_I_syn_ );
++  // }
++
++
++  Name
++  nest::migliore::get_i_syn_name( size_t elem )
++  {
++    std::stringstream i_syn_name;
++    i_syn_name << "I_syn_" << elem + 1;
++    return Name( i_syn_name.str() );
++  }
++
++  void
++  migliore::insert_current_recordables( size_t first )
++  {
++    // std::cout << "migliore taus syn size " << P_.tau_syn_.size() << "\n";
++    for ( size_t receptor = first; receptor < P_.tau_syn_.size(); ++receptor )
++      {
++	size_t elem = migliore::State_::I_SYN
++	  + receptor * migliore::State_::NUM_STATE_ELEMENTS_PER_RECEPTOR;
++	Name a = get_i_syn_name( receptor );
++	recordablesMap_.insert( a , this->get_data_access_functor( elem ) );
++      }
++  }
++
++  DataAccessFunctor< migliore >
++  migliore::get_data_access_functor( size_t elem )
++  {
++    return DataAccessFunctor< migliore >( *this, elem );
++  }
++
++  /* ----------------------------------------------------------------
++   * Default constructors defining default parameters and state
++   * ---------------------------------------------------------------- */
++
++  nest::migliore::Parameters_::Parameters_()
++    : E_L_( -72.5 )
++    , vres_( -65.0 )
++    , vtm_( -52.0 )
++    , Cm_( 2047.4164432004916 )
++    , ith_( 300.9987901902274 )
++    , tao_m_( 3310.462136574088 )
++    , sc_( 4526.328798037026 )
++    , bet_( 0.24522251335200956 )
++    , delta1_( 0.009906254244852036 )
++    , cost_idep_ini_( 0.017625482908326662 )
++    , Idep_ini_vr_( 1.0122905259090516 )
++    , psi1_( 0.1975362978159442 )
++    , a_( 14.2787 )
++    , b_( -2.10966 )
++    , c_( 0.0608809 )
++    , alp_( 225.491 )
++    , istim_min_spikinig_exp_( 400 )
++    , istim_max_spikinig_exp_( 1000 )
++    , corrcostatratti_( 1 )
++    , corrcost_( 0 )
++    , Delta_T( 2.0 )    // mV
++    , I_e_( 0.0 )                                     // pA
++    , V_th_( -52.0 )                                   // mV
++    , V_min_( -90.0 ) //-std::numeric_limits< double >::max() ) // mV
++    , t_ref_( 2.0 )            // in ms
++    , tau_syn_( 3, 2.0 )       // in ms
++    , firstSpikeFlag_( false)  
++    , has_connections_( false )
++  {
++  }
++
++  nest::migliore::State_::State_()
++    : V_m_( -72.5 )       // membrane potential  (E_L_+(1-exp(-S_.current_/1000))*(vtm-E_L_))/V_.Vconvfact  TOBEFIXED
++    , init_sign_( 0.0 ) // membrane adaptation variable
++    , Iadap_ini_( 0.0 ) // membrane adaptation variable
++    , Idep_ini_( 0.0 ) // membrane dependent variable
++    , sis_( 0.0 ) // counter variable
++    , counter_( 0.0 ) // counter variable
++    , I_inj_( 0.0 )         // input current
++    , r_ref_( 0 )
++  {
++    i_syn_.clear();
++  }
++
++  /* ----------------------------------------------------------------
++   * Parameter and state extractions and manipulation functions
++   * ---------------------------------------------------------------- */
++
++  void
++  nest::migliore::Parameters_::get( DictionaryDatum& d ) const
++  {
++    def< double >( d, names::I_e, I_e_ );
++    def< double >( d, names::V_th, V_th_ ); // threshold value
++    def< double >( d, names::V_min, V_min_ );
++    def< double >( d, names::E_L, E_L_ );
++    def< double >( d, names::vres, vres_ );
++    def< double >( d, names::vtm, vtm_);
++    def< double >( d, names::Cm, Cm_);
++    def< double >( d, names::ith, ith_);
++    def< double >( d, names::tao_m, tao_m_);
++    def< double >( d, names::sc, sc_);
++    def< double >( d, names::bet, bet_);
++    def< double >( d, names::delta1, delta1_);
++    def< double >( d, names::cost_idep_ini, cost_idep_ini_);
++    def< double >( d, names::Idep_ini_vr, Idep_ini_vr_);
++    def< double >( d, names::psi1, psi1_);
++    def< double >( d, names::a, a_);
++    def< double >( d, names::b, b_);
++    def< double >( d, names::c, c_);
++    def< double >( d, names::alp, alp_);
++    def< double >( d, names::istim_min_spikinig_exp, istim_min_spikinig_exp_);
++    def< double >( d, names::istim_max_spikinig_exp, istim_max_spikinig_exp_);
++    def< double >( d, names::corrcostatratti, corrcostatratti_);
++    def< double >( d, names::corrcost, corrcost_);
++    def< double >( d, names::Delta_T, Delta_T );
++    def< double >( d, names::t_ref, t_ref_ );
++    def< int >( d, names::n_synapses, n_receptors_() );
++    def< bool >( d, names::has_connections, has_connections_ );
++
++    ArrayDatum tau_syn_ad( tau_syn_ );
++    def< ArrayDatum >( d, names::tau_syn, tau_syn_ad );
++  }
++
++  void
++  nest::migliore::Parameters_::set( const DictionaryDatum& d, Node* node )
++  {
++    updateValueParam< double >( d, names::V_th, V_th_, node );
++    updateValueParam< double >( d, names::V_min, V_min_, node );
++    updateValueParam< double >( d, names::I_e, I_e_, node );
++    updateValueParam< double >( d, names::E_L, E_L_, node );
++    updateValueParam< double >( d, names::vres, vres_, node );
++    updateValueParam< double >( d, names::vtm, vtm_, node );
++    updateValueParam< double >( d, names::Cm, Cm_, node );
++    updateValueParam< double >( d, names::ith, ith_, node );
++    updateValueParam< double >( d, names::tao_m, tao_m_, node );
++    updateValueParam< double >( d, names::sc, sc_, node );
++    updateValueParam< double >( d, names::bet, bet_, node );
++    updateValueParam< double >( d, names::delta1, delta1_, node );
++    updateValueParam< double >( d, names::cost_idep_ini, cost_idep_ini_, node );
++    updateValueParam< double >( d, names::Idep_ini_vr, Idep_ini_vr_, node );
++    updateValueParam< double >( d, names::psi1, psi1_, node );
++    updateValueParam< double >( d, names::a, a_, node );
++    updateValueParam< double >( d, names::b, b_, node );
++    updateValueParam< double >( d, names::c, c_, node );
++    updateValueParam< double >( d, names::alp, alp_, node );
++    updateValueParam< double >( d, names::istim_min_spikinig_exp, istim_min_spikinig_exp_, node );
++    updateValueParam< double >( d, names::istim_max_spikinig_exp, istim_max_spikinig_exp_, node );
++    updateValueParam< double >( d, names::corrcostatratti, corrcostatratti_, node );
++    updateValueParam< double >( d, names::corrcost, corrcost_, node );
++    updateValueParam< double >( d, names::Delta_T, Delta_T, node );
++    updateValueParam< double >( d, names::t_ref, t_ref_, node );
++    // updateValueParam< double >( d, names::miglp1, miglp1_, node );
++    // updateValueParam< double >( d, names::miglp2, miglp2_, node );
++    // updateValueParam< double >( d, names::miglp3, miglp3_, node );
++    // updateValueParam< double >( d, names::miglp4, miglp4_, node );
++    if ( t_ref_ < 0 )
++      {
++	throw BadProperty( "Refractory time must not be negative." );
++      }
++
++    const size_t old_n_receptors = this->n_receptors_();
++    if ( updateValue< std::vector< double > >( d, "tau_syn", tau_syn_ ) )
++      {
++	if ( this->n_receptors_() != old_n_receptors && has_connections_ == true )
++	  {
++	    throw BadProperty( "The neuron has connections, therefore the number of ports cannot be reduced." );
++	  }
++	for ( size_t i = 0; i < tau_syn_.size(); ++i )
++	  {
++	    if ( tau_syn_[ i ] <= 0 )
++	      {
++		throw BadProperty( "All synaptic time constants must be strictly positive." );
++	      }
++	    if ( tau_syn_[ i ] == tao_m_ )
++	      {
++		throw BadProperty( "Membrane and synapse time constant(s) must differ. See note in documentation." );
++	      }
++	  }
++      }
++    // std::cout << "migliore set taus syn size " << tau_syn_.size() << "\n";
++    // std::cout << "migliore n_receptors " << this->n_receptors_() << "\n";
++  }
++
++  void
++  nest::migliore::State_::get( DictionaryDatum& d, const Parameters_& ) const
++  {
++    def< double >( d, names::init_sign, init_sign_ ); // Membrane potential adaptationariable
++    def< double >( d, names::Iadap_ini, Iadap_ini_ ); // Membrane potential adaptationariable
++    def< double >( d, names::Idep_ini , Idep_ini_ ); // Membrane potential adaptationariable
++    def< double >( d, names::sis , sis_ ); // Membrane potential adaptationariable
++    def< double >( d, names::I, I_inj_ ); // Membrane potential
++    def< double >( d, names::V_m, V_m_ ); // Membrane potential
++  }
++
++  void
++  nest::migliore::State_::set( const DictionaryDatum& d, const Parameters_&, Node* node )
++  {
++    updateValueParam< double >( d, names::init_sign, init_sign_, node );
++    updateValueParam< double >( d, names::Iadap_ini, Iadap_ini_, node );
++    updateValueParam< double >( d, names::Idep_ini, Idep_ini_, node );
++    updateValueParam< double >( d, names::sis, sis_, node );
++    updateValueParam< double >( d, names::V_m, V_m_, node );
++    updateValueParam< double >( d, names::I, I_inj_, node );
++  }
++
++  nest::migliore::Buffers_::Buffers_( migliore& n )
++    : logger_( n )
++  {
++  }
++
++  nest::migliore::Buffers_::Buffers_( const Buffers_&, migliore& n )
++    : logger_( n )
++  {
++  }
++
++  /* ----------------------------------------------------------------
++   * Default and copy constructor for node
++   * ---------------------------------------------------------------- */
++
++  nest::migliore::migliore()
++    : ArchivingNode()
++    , P_()
++    , S_()
++    , B_( *this )
++  {
++    recordablesMap_.create( *this );
++  }
++
++  nest::migliore::migliore( const migliore& n )
++    : ArchivingNode( n )
++    , P_( n.P_ )
++    , S_( n.S_ )
++    , B_( n.B_, *this )
++  {
++    recordablesMap_.create( *this );
++  }
++
++  /* ----------------------------------------------------------------
++   * Node initialization functions
++   * ---------------------------------------------------------------- */
++
++  void
++  nest::migliore::init_buffers_()
++  {
++    B_.spikes_.clear();   // includes resize
++    B_.currents_.clear(); // includes resize
++    B_.logger_.reset();   // includes resize
++    ArchivingNode::clear_history();
++  }
++
++  void
++  nest::migliore::calibrate()
++  {
++    B_.logger_.init();
++
++    // t_ref_ specifies the length of the absolute refractory period as
++    // a double in ms. The grid based iaf_psc_exp can only handle refractory
++    // periods that are integer multiples of the computation step size (h).
++    // To ensure consistency with the overall simulation scheme such conversion
++    // should be carried out via objects of class nest::Time. The conversion
++    // requires 2 steps:
++    //     1. A time object r is constructed, defining representation of
++    //        t_ref_ in tics. This representation is then converted to computation
++    //        time steps again by a strategy defined by class nest::Time.
++    //     2. The refractory time in units of steps is read out get_steps(), a
++    //        member function of class nest::Time.
++    //
++    // Choosing a t_ref_ that is not an integer multiple of the computation time
++    // step h will lead to accurate (up to the resolution h) and self-consistent
++    // results. However, a neuron model capable of operating with real valued
++    // spike time may exhibit a different effective refractory time.
++
++    const double h = Time::get_resolution().get_ms();
++
++    V_.P11_syn_.resize( P_.n_receptors_() );
++    V_.P21_syn_.resize( P_.n_receptors_() );
++
++    S_.i_syn_.resize( P_.n_receptors_() );
++
++    B_.spikes_.resize( P_.n_receptors_() );
++
++    V_.P22_ = std::exp( -h / P_.tao_m_ );
++    V_.P20_ = P_.tao_m_ / P_.Cm_ * ( 1.0 - V_.P22_ );
++
++    for ( size_t i = 0; i < P_.n_receptors_(); i++ )
++      {
++	V_.P11_syn_[ i ] = std::exp( -h / P_.tau_syn_[ i ] );
++	// std::cout << "tau syn " << P_.tau_syn_[ i] << "\n";
++	// these are determined according to a numeric stability criterion
++	V_.P21_syn_[ i ] = propagator_32( P_.tau_syn_[ i ], P_.tao_m_, P_.Cm_, h );
++
++	B_.spikes_[ i ].resize();
++      }
++
++    V_.RefractoryCounts_ = Time( Time::ms( P_.t_ref_ ) ).get_steps();
++    // since t_ref_ >= 0, this can only fail in error
++    assert( V_.RefractoryCounts_ >= 0 );
++
++    V_.time_scale_ = 1 / (-P_.sc_ / (P_.Cm_ * P_.E_L_));
++    V_.d_dt = h;
++    V_.dt = V_.d_dt/V_.time_scale_;
++
++    V_.beta2 = pow(P_.bet_,2);
++    V_.t_step = V_.dt;
++    V_.t_spk = -0.3;
++    
++    V_.H = (90+P_.E_L_)*P_.sc_*(P_.bet_-P_.delta1_)/(P_.E_L_*(-200));
++    V_.Vconvfact = -P_.E_L_;
++    V_.vrm = P_.vres_/V_.Vconvfact;
++    V_.psi1 = pow((-4)*P_.bet_+pow(1+P_.delta1_,2.0),0.5);
++    // t_step = t - t0
++    V_.VV_1 = 0.5 / ((P_.bet_ -P_.delta1_) * (pow(P_.bet_,2.0) + (P_.bet_-1.0) * P_.delta1_) * (4.0 * P_.bet_ - pow((1.0 + P_.delta1_), 2.0))) * P_.psi1_;
++    V_.VV_2 = 2.0 * exp(-V_.t_step * P_.bet_) * (P_.bet_-1.0) * P_.bet_ * (P_.bet_ - P_.delta1_) * P_.psi1_;
++    V_.VV_3 = (pow(P_.bet_,2) + ((- 1.0) + P_.bet_) * P_.delta1_) * P_.psi1_;
++    V_.VV_4 = exp((1.0 / 2.0) * V_.t_step * (-1.0 + P_.delta1_ -P_.psi1_));
++    V_.VV_5 = P_.bet_ * (P_.bet_ -P_.delta1_) * (-1.0 -P_.delta1_ + P_.bet_ * (3.0 + P_.delta1_ -P_.psi1_) + P_.psi1_);
++    V_.VV_6 = (pow(P_.bet_,2) -P_.delta1_ + P_.bet_ * P_.delta1_);
++    V_.VV_7 = (1.0 + (-2.0) * P_.bet_ + P_.delta1_ -P_.psi1_);
++    V_.VV_8 = exp((1.0 / 2.0) * V_.t_step * (-1.0 + P_.delta1_ + P_.psi1_));
++    V_.VV_9 = P_.bet_ * (P_.bet_-P_.delta1_) * (-1.0 -P_.delta1_ -P_.psi1_ + P_.bet_ * (3.0 + P_.delta1_ + P_.psi1_));
++    V_.VV_10 = (pow(P_.bet_,2) - P_.delta1_ + P_.bet_ * P_.delta1_);
++    V_.VV_11 = (1.0 + (-2.0) * P_.bet_ + P_.delta1_ + P_.psi1_);
++    // V_.GG = P_.bet_ * (P_.bet_ - P_.delta1_) * (-1 - P_.delta1_ - P_.psi1_ + P_.bet_ * (3 + P_.delta1_ + P_.psi1_));
++    V_.C = P_.bet_ - P_.delta1_;
++    // V_.JJ = 2 * exp(-V_.t_step * P_.bet_)  * (P_.bet_ - 1) * P_.bet_ * V_.C * P_.psi1_;
++    // V_.JJ_1 = exp(0.5 * V_.t_step * (-1 + P_.delta1_ - P_.psi1_));
++    // V_.JJ_2 = (-1 - P_.delta1_ + P_.bet_ * (3 + P_.delta1_ - P_.psi1_) + P_.psi1_);
++    // V_.JJ_3 = (V_.beta2 + (P_.bet_ - 1) * P_.delta1_) * P_.psi1_;
++    // V_.JJ_4 = (V_.beta2 - P_.delta1_ + P_.bet_ * P_.delta1_);
++    // V_.JJ_5 = (1 + (-2) * P_.bet_ + P_.delta1_ - P_.psi1_);
++    // V_.JJ_6 = exp(0.5 * V_.t_step * (-1 + P_.delta1_ + P_.psi1_));
++    // V_.JJ_7 = 0.5 / V_.C / (V_.beta2 + (P_.bet_ - 1) * P_.delta1_) / (4 * P_.bet_ - pow((1 + P_.delta1_), 2)) * P_.psi1_;
++
++    V_.pdelta = pow((1 + P_.delta1_), 2);
++    
++    // V_.AA_4 = P_.bet_ * V_.C * (-V_.pdelta + (-1.0 + P_.delta1_) * P_.psi1_ + 2.0 * P_.bet_ * (2.0 + P_.psi1_));
++    // V_.AA_5 = V_.beta2 + (-1.0 + P_.bet_) * P_.delta1_;
++    // V_.AA_6 = 1.0 -4.0 * P_.bet_ + P_.delta1_ * (2.0 + P_.delta1_ - P_.psi1_) + P_.psi1_;
++    // V_.AA_7 = (1.0 + P_.delta1_) * (-1.0 - P_.delta1_ + P_.psi1_);
++
++    // V_.AA_9 = P_.bet_ * V_.C * (V_.pdelta + 2.0 * P_.bet_ * (-2.0 + P_.psi1_) + (-1.0 + P_.delta1_) * P_.psi1_);
++    // V_.AA_10 = V_.beta2 + (-1.0 + P_.bet_) * P_.delta1_;
++    // V_.AA_11 = -4.0 * P_.bet_ + V_.pdelta + (-1.0 + P_.delta1_) * P_.psi1_;
++    // V_.AA_12 = (1.0 + P_.delta1_) * (1.0 + P_.delta1_ + P_.psi1_);
++
++    V_.AA_1 = -4.0 * pow(P_.bet_,3.0) + pow(P_.bet_,2.0) * pow((-1.0+P_.delta1_),2.0) - P_.delta1_ * pow((1.0 + P_.delta1_),2.0) + P_.bet_ * P_.delta1_ * (5 + 2.0 * P_.delta1_ + pow(P_.delta1_,2.0));
++    V_.AA_2 = 2.0 * exp(-V_.t_step * P_.bet_) * P_.bet_ * (4.0 * pow(P_.bet_,2.0) + P_.delta1_ * pow((1.0+P_.delta1_),2.0) - P_.bet_ * (1.0 + 6 * P_.delta1_ + pow(P_.delta1_,2.0)));
++    V_.AA_3 = exp((1.0 / 2.0)*V_.t_step*(-1.0+P_.delta1_+P_.psi1_));
++    V_.AA_4 = -1.0-2.0*P_.delta1_ - pow(P_.delta1_,2.0) - P_.psi1_ + P_.delta1_ * P_.psi1_+2.0*P_.bet_*(2.0+P_.psi1_);
++    V_.AA_5 = (pow(P_.bet_,2.0)-P_.delta1_+P_.bet_*P_.delta1_);
++    V_.AA_6 = (1.0-4.0*P_.bet_+2.0*P_.delta1_+pow(P_.delta1_,2.0)+P_.psi1_-P_.delta1_*P_.psi1_);
++    V_.AA_7 = (1.0+P_.delta1_)*(-1.0-P_.delta1_+P_.psi1_);
++    V_.AA_8 = exp((-1.0)*(1.0 / 2.0) * V_.t_step * (1.0-P_.delta1_+P_.psi1_));
++    V_.AA_9 = P_.bet_ * (P_.bet_-P_.delta1_)*(1.0+2.0*P_.delta1_+ pow(P_.delta1_,2.0)-P_.psi1_+P_.delta1_*P_.psi1_+2.0*P_.bet_*(-2.0+P_.psi1_));
++    V_.AA_10 = (pow(P_.bet_,2.0)-P_.delta1_+P_.bet_*P_.delta1_);
++    V_.AA_11 = (1.0-4.0*P_.bet_+2.0*P_.delta1_ + pow(P_.delta1_,2.0) - P_.psi1_+P_.delta1_*P_.psi1_);
++    V_.AA_12 = (2.0*(P_.bet_-P_.delta1_)*(pow(P_.bet_,2.0)+(-1.0+P_.bet_)*P_.delta1_)*(4.0*P_.bet_-pow((1.0+P_.delta1_),2.0)));
++
++    V_.DD_1 = exp(-V_.t_step * P_.bet_);
++  }
++
++  /* ----------------------------------------------------------------
++   * Update and spike handling functions
++   */
++
++  double
++  nest::migliore::tagliorette(double corr)
++  {
++    double dur_sign = std::numeric_limits<double>::infinity();
++    //# I = sym.Symbol('I')
++    double vinc_inf = 700;
++    double lin_func_sup;
++    // # lin_func_inf=0.68*I - 190.0
++    // # if corr<vinc_inf and corr>0:
++    // # 	dur_sign=lin_func_inf.subs(I,corr)
++    if (corr < vinc_inf && corr > 0)
++      {
++	dur_sign = 0.68*corr - 190.0;
++	// lin_func_inf = 0.68*corr - 190.0;
++      }
++    double vinc_sup = 1300; 
++    if (corr > vinc_sup)
++      {
++	lin_func_sup = 76.86-0.028*corr;
++	dur_sign = lin_func_sup;
++	// dur_sign = corr + std::numeric_limits<double>::infinity();
++	//double lin_func_sup = corr + std::numeric_limits<double>::infinity();
++      }
++    return dur_sign;
++  }
++
++  double
++  nest::migliore::migliV(double t, double delta, double Psi, 
++			 double alpha, double beta, double IaA0, 
++			 double IdA0, double t0, double V0,
++			 int r_ref_, double vrm)
++  {
++    double to_return = V_.VV_1 * (V_.VV_2 * IdA0 + -2.0 * (alpha -beta + delta) * V_.VV_3 + V_.VV_4 * (IdA0 * V_.VV_5 - V_.VV_6 * (alpha * V_.VV_7 + (beta -delta) * (-1.0 + 2.0 * IaA0 * beta -delta + Psi + V0 * (-1.0 -delta + Psi)))) + V_.VV_8 * (-IdA0 * V_.VV_9 + V_.VV_10 * (alpha * V_.VV_11 + (beta -delta) * (-1.0 + 2.0 * IaA0 * beta-delta -Psi -V0 * (1.0 + delta + Psi)))));
++    // double G = (V_.beta2 - delta + beta * delta) * (alpha * (1 + (-2) * beta + delta + Psi) + V_.C * (-1 + 2 * IaA0 * beta - delta - Psi - V0 * (1 + delta + Psi)));
++    // double F = -IdA0 * V_.GG + G;
++    // double D = V_.JJ * IdA0 - 2 * (alpha - beta + delta) * V_.JJ_3 + V_.JJ_1 * (IdA0 * beta * V_.C * V_.JJ_2 - V_.JJ_4 * (alpha * V_.JJ_5 + V_.C * (-1 + 2 * IaA0 * beta - delta + Psi + V0 * (-1 - delta + Psi)))) + V_.JJ_6 * F;
++    //  double D = (2 * exp(((-1) * t + t0) * beta) * IdA0 * (beta - 1) * beta * C * Psi -2 * (alpha - beta + delta) * (beta2 + (beta - 1) * delta) * Psi + exp(0.5 * (t - t0) * ((-1) + delta - Psi)) * (IdA0 * beta * C * ((-1) - delta + beta * (3 + delta - Psi) + Psi) - (beta2 - delta + beta * delta) * (alpha * (1 + (-2) * beta + delta - Psi) + C * ((-1) + 2 * IaA0 * beta - delta + Psi + V0 * ((-1) - delta + Psi)))) + exp(0.5 * (t - t0) * ((-1) + delta + Psi)) * ((-1) * IdA0 * beta * (beta+(-1) * delta) * ((-1) - delta - Psi + beta * (3 + delta + Psi)) + (beta2 - delta+beta * delta) * (alpha * (1 + (-2) * beta + delta + Psi) + C * ((-1) + 2 * IaA0 * beta+(-1) * delta - Psi - V0 * (1 + delta + Psi)))));
++    if (r_ref_ == 0)
++      {
++	//return 0.5 / C / (beta2 + (beta - 1) * delta) / (4 * beta + (- 1) * pow((1 + delta),2)) * Psi * D;
++	// return V_.JJ_7 * D;
++	return to_return;
++      }
++    else
++      {
++	return vrm;
++      }
++  }
++
++  double
++  nest::migliore::set_v_ini(double to_v_ini,
++			    int r_ref_, double vrm)
++  {
++    if (r_ref_ == 0)
++      {
++	return to_v_ini;
++      }
++    else
++      {
++	return vrm;
++      }
++  }
++
++
++
++  double
++  nest::migliore::Iadap(double t, double delta, double Psi, double alpha,
++			double beta, double IaA0, double IdA0, double t0,
++			double V0, int r_ref_)
++  {
++    double to_return = (-2.0 * alpha * V_.AA_1 + IdA0 * V_.AA_2 + V_.AA_3 * (-IdA0 * beta * (beta - delta) * V_.AA_4 + V_.AA_5 * (alpha * V_.AA_6 + (beta - delta) * (4.0 * IaA0 * beta -2.0 * (1.0 + V0) * Psi + IaA0 * V_.AA_7))) + V_.AA_8 * (IdA0 * V_.AA_9 + V_.AA_10 * (alpha * V_.AA_11 - (beta-delta) * (-4.0 * IaA0 * beta - 2.0*(1.0+V0)*Psi+IaA0*(1.0+delta)*(1.0+delta+Psi)))))/ V_.AA_12;
++    if (r_ref_ == 0)
++      {
++	return to_return;
++      }
++    else
++      {
++	// std::cout << "465 Refractrory\n";
++	return IaA0;
++      }
++  }
++
++  double
++  nest::migliore::Idep(double t, double beta, double IdA0, double t0, int r_ref_)
++  {
++    if (r_ref_ == 0)
++      {
++	return V_.DD_1  * IdA0;
++      }
++    else
++      {
++	return IdA0;
++      }
++  }
++
++  double
++  nest::migliore::exp_cum(double x, double a, double b)
++  {
++    return a * (1 - exp(-b * x));
++  }
++
++  double
++  nest::migliore::monod(double x, double a, double b, double c, double alp)
++  {
++    double to_return = c + (a * exp(b) * x) / (alp + x);
++    return to_return;
++  }
++
++  void
++  nest::migliore::update( Time const& origin, const long from, const long to )
++  {
++    assert( to >= 0 && ( delay ) from < kernel().connection_manager.get_min_delay() );
++    assert( from < to );
++
++    // const double h = Time::get_resolution().get_ms();
++    // double v_old;
++    // double Iadap_ini_old, Idep_ini_old;
++    double t0_val = origin.get_ms() / V_.time_scale_;
++    double local_time_step = V_.dt;
++    double t_final = t0_val + local_time_step;
++
++    // For breakpoint conditions
++    double timess;
++    double current;
++    double vmss;
++    
++    // double afirst = 0;
++    double meancorlastis = 0;
++    double stdcorlastis = 0;
++    double meancorlastprec = 0;
++    double stdcorlastprec = 0;
++    double v_ini = S_.V_m_ / V_.Vconvfact;
++    double vini_prec = v_ini;
++    double teta;
++    double c_aux;
++    double paramL_;
++
++
++  
++    for ( long lag = from; lag < to; ++lag )
++      {
++	// neuron is never refractory
++	// use standard forward Euler numerics
++	// double I_syn = B_.spikes_.get_value( lag );
++	double corpre = S_.I_inj_; // + S_.I;
++	// set new input current
++	S_.I_inj_ = B_.currents_.get_value( lag );
++	S_.current_ = S_.I_inj_; // + S_.I;
++	// std::cout << "\n";
++	// std::cout << "552 Begin " << " cor " << S_.current_ << " Inj " << S_.I_inj_ << " syn " << S_.i_syn_[1] << "\n";
++
++	if ( S_.r_ref_ == 0 ) // neuron not refractory, so evolve add synaptic currents
++	  for ( size_t i = 0; i < P_.n_receptors_(); i++ )
++	    {
++	      // S_.V_m_ += V_.P21_syn_[ i ] * S_.i_syn_[ i ];
++	      // std::cout << "syn " << S_.i_syn_[ i ] << "\n";
++	      S_.current_ += S_.i_syn_[ i ]; // not sure about this
++	    }
++	for ( size_t i = 0; i < P_.n_receptors_(); i++ )
++	  {
++	    // exponential decaying PSCs
++	    S_.i_syn_[ i ] *= V_.P11_syn_[ i ];
++	    
++	    // collect spikes
++	    S_.i_syn_[ i ] += B_.spikes_[ i ].get_value( lag ); // not sure about this
++	  }
++
++
++	// For Breakpoint conditions
++	current = S_.current_;
++	vmss = S_.V_m_;
++	timess = t_final * V_.time_scale_;
++
++	// Update integration time window
++	t0_val = t_final;
++	t_final = t0_val + local_time_step;
++
++	// t0_val = origin.get_ms() / V_.time_scale_;
++	// t_final = t0_val + (lag + 1) * V_.dt ;//Time::step( origin.get_steps() + lag + 1 );
++	// timess = t_final * V_.time_scale_;
++	// std::cout << "t_final =" << t_final*V_.time_scale_ << " ms. " << "Vm " << S_.V_m_ << " V_ini " << v_ini << "\n";
++	// std::cout << "\n439 Time from (" << from << ") =" << t0_val*V_.time_scale_ << " ms to (" << to<< ") =" << t_final*V_.time_scale_ << " ms.\n";
++	// v_old = v_ini;
++	// Iadap_ini_old = S_.Iadap_ini_;
++	// Idep_ini_old = S_.Idep_ini_;
++	// std::cout << "Vm " << v_ini * V_.Vconvfact << "\n";
++	// v_ini +=
++	//   h * ( 0.04 * v_old * v_old + 5.0 * v_old + 140.0 - miglv1_old + S_.I_inj_ + P_.I_e_ ) + I_syn;
++	// S_.miglv1_ += h * P_.miglp1_ * ( P_.miglp2_ * v_old - miglv1_old );
++    
++	// if (S_.current_ > 0)
++	//   {
++	//     // std::cout << "591 corr > 0 \n";
++	//     S_.sis_ = S_.sis_+1;
++	//     if (S_.sis_ >= 2)
++	//       {
++	// 	meancorlastprec = meancorlastis;
++	// 	stdcorlastprec = stdcorlastis;
++	// 	stdcorlastis = ((S_.sis_-2)*stdcorlastis+(S_.sis_-1)*pow(meancorlastis,2) + pow(S_.current_,2)-S_.sis_*pow(((S_.sis_-1)*meancorlastis+S_.current_)/S_.sis_,2))/(S_.sis_-1);
++	// 	meancorlastis = ((S_.sis_-1)*meancorlastis+S_.current_)/S_.sis_;
++	//       }
++	//     else
++	//       {
++	// 	stdcorlastis = 0;
++	// 	meancorlastis = S_.current_;
++	//       }
++	//   }
++	if ((t_final-S_.init_sign_)*V_.time_scale_ >= nest::migliore::tagliorette(S_.current_))
++	  {
++	    // std::cout << "604 tagliorette " << nest::migliore::tagliorette(S_.current_) << " cor " << S_.current_ << "\n";
++	    if (P_.corrcostatratti_)
++	      {
++		// std::cout << "611 corrcostatratti " << " cor " << S_.current_ << "\n";
++		if (S_.current_ > P_.ith_)
++		  {
++		    // std::cout << "614 cor > ith " << S_.current_ << "\n";
++		    if (corpre < P_.ith_ ) //|| i == 0)
++		      {
++			S_.init_sign_ = t_final;
++			S_.Idep_ini_ = P_.cost_idep_ini_*(S_.current_-P_.ith_);
++			S_.Iadap_ini_ = 0;
++		      }
++		    if (corpre > P_.ith_ && corpre < S_.current_)
++		      {
++			S_.init_sign_ = S_.init_sign_*(1+(corpre-P_.ith_)/corpre);
++			S_.Idep_ini_ = P_.cost_idep_ini_*(S_.current_-P_.ith_);
++		      }
++		  }
++	      }
++	    if (P_.corrcost_)
++	      {
++		if (S_.current_ > P_.ith_)
++		  {
++		    if (corpre < P_.ith_ )
++		      {
++			S_.init_sign_ = t_final;
++			S_.Idep_ini_ = P_.cost_idep_ini_*(S_.current_-P_.ith_);
++			S_.Iadap_ini_ = 0;
++		      }
++		  }
++	      }
++	    if (corpre == 0)
++	      {
++		v_ini = vini_prec;
++	      }
++	    else
++	      {
++		// Set the v_ini depending on the refractory period
++		v_ini = set_v_ini((P_.E_L_+(1-exp(-S_.current_/1000))*(P_.vtm_-P_.E_L_))/V_.Vconvfact, S_.r_ref_, V_.vrm);
++	      }
++	    vini_prec = v_ini;
++	    V_.out.push_back(v_ini);
++	    // t_out.append(t_final);
++	    // Iada.append(S_.Iadap_ini_);
++	    // Ide.append(S_.Idep_ini_);
++	  }
++	else
++	  {
++	    // std::cout << "688 NO tagliorette " << S_.current_ << "\n";
++	    vini_prec = v_ini;
++	    if ((S_.current_ < P_.ith_ && S_.current_ >= 0) ) //|| i == 0)
++	      {
++		// std::cout << "691 cor < ith " << S_.current_ << "\n";
++		if (corpre < 0)
++		  {
++		    S_.Iadap_ini_ = 90/P_.E_L_ + 1;
++		    S_.Idep_ini_ = 0;
++		    v_ini = set_v_ini(vini_prec, S_.r_ref_, V_.vrm);
++		  }
++		if (((S_.current_ / P_.sc_) / (P_.bet_ - P_.delta1_) - 1) <= v_ini)
++		  {
++		    S_.Idep_ini_ = 0;
++		    S_.Iadap_ini_ = (S_.current_ / P_.sc_) / (P_.bet_ - P_.delta1_);
++		    v_ini = set_v_ini(((S_.current_ / P_.sc_) / (P_.bet_ - P_.delta1_) - 1), S_.r_ref_, V_.vrm);
++		  }
++		else
++		  {
++		    v_ini = migliV(t_final, P_.delta1_, V_.psi1, S_.current_/P_.sc_, P_.bet_, S_.Iadap_ini_, S_.Idep_ini_, t0_val, v_ini, S_.r_ref_, V_.vrm);
++		    S_.Iadap_ini_ = Iadap(t_final, P_.delta1_, V_.psi1, S_.current_ / P_.sc_, P_.bet_, S_.Iadap_ini_, S_.Idep_ini_, t0_val, v_ini, S_.r_ref_);
++		    S_.Idep_ini_ = Idep(t_final, P_.bet_, S_.Idep_ini_, t0_val, S_.r_ref_);
++		  }
++		if (v_ini * V_.Vconvfact < -90)
++		  {
++		    v_ini = set_v_ini(-90 / V_.Vconvfact, S_.r_ref_, V_.vrm);
++		    S_.Iadap_ini_ = 0;
++		  }
++		V_.out.push_back(v_ini);
++	      }
++	    else
++	      {
++		if (S_.current_ < corpre && S_.current_ > 0 && (V_.t_spk+2*V_.d_dt) < t_final*V_.time_scale_ && V_.out.size() > 2)
++		  {
++		    // std::cout << "726 v_ini " << v_ini << "\n";
++		    teta = (V_.out[V_.out.size()-1]/(corpre / P_.sc_))*(1/V_.dt-P_.delta1_) - (V_.out[V_.out.size()-2]/((corpre / P_.sc_)*V_.dt))-P_.delta1_/(corpre / P_.sc_)-1;
++		    if (teta < 0)
++		      {
++			teta = 0;
++		      }
++		    S_.Idep_ini_ = S_.Iadap_ini_ + teta * (S_.current_ / P_.sc_) / P_.bet_;
++		    // tetalist.append(teta);
++		    v_ini = migliV(t_final, P_.delta1_, V_.psi1,
++				   S_.current_/P_.sc_, P_.bet_, S_.Iadap_ini_, S_.Idep_ini_, t0_val, v_ini, S_.r_ref_, V_.vrm);
++		    S_.Iadap_ini_ = Iadap(t_final, P_.delta1_, V_.psi1,
++					  S_.current_/P_.sc_, P_.bet_, S_.Iadap_ini_, S_.Idep_ini_, t0_val, v_ini, S_.r_ref_);
++		    S_.Idep_ini_ = Idep(t_final, P_.bet_,
++					S_.Idep_ini_, t0_val, S_.r_ref_);
++		  }
++		else
++		  {
++		    if (S_.current_ > 0)
++		      {
++			v_ini = migliV(t_final, P_.delta1_, V_.psi1,
++				       S_.current_/P_.sc_, P_.bet_, S_.Iadap_ini_, S_.Idep_ini_, t0_val, v_ini, S_.r_ref_, V_.vrm);
++			S_.Iadap_ini_ = Iadap(t_final, P_.delta1_, V_.psi1,
++					      S_.current_/P_.sc_, P_.bet_, S_.Iadap_ini_, S_.Idep_ini_, t0_val, v_ini, S_.r_ref_);
++			S_.Idep_ini_ = Idep(t_final, P_.bet_, S_.Idep_ini_, t0_val, S_.r_ref_);
++		      }
++		  }
++		if (corpre != S_.current_ and (S_.current_ < 0 and S_.current_ > -200))
++		  {
++		    S_.Iadap_ini_ = (90+P_.E_L_)*S_.current_/(P_.E_L_*(-200));
++		    S_.Idep_ini_ = 0;
++		    v_ini = set_v_ini(vini_prec, S_.r_ref_, V_.vrm);
++		  }
++		if (S_.current_ < 0 and S_.current_ > -200)
++		  {
++		    // std::cout << "785 v_ini " << v_ini << "\n";
++		    v_ini = migliV(t_final, P_.delta1_, V_.psi1, V_.H * S_.current_/P_.sc_, P_.bet_, S_.Iadap_ini_, S_.Idep_ini_, t0_val, v_ini, S_.r_ref_, V_.vrm);
++		    S_.Iadap_ini_ = Iadap(t_final, P_.delta1_, V_.psi1, V_.H * S_.current_/P_.sc_, P_.bet_, S_.Iadap_ini_, S_.Idep_ini_, t0_val, v_ini, S_.r_ref_);
++		    S_.Idep_ini_ = Idep(t_final, P_.bet_,
++					S_.Idep_ini_, t0_val, S_.r_ref_);
++		  }
++		if (corpre != S_.current_ and S_.current_ <= -200)
++		  {
++		    // std::cout << "793 v_ini " << v_ini << "\n";
++		    S_.Iadap_ini_ = 90/P_.E_L_ + 1;
++		    S_.Idep_ini_ = 0;
++		    v_ini = set_v_ini(vini_prec, S_.r_ref_, V_.vrm);
++		  }
++		if (S_.current_ <= -200)
++		  {
++		    v_ini = migliV(t_final, P_.delta1_, V_.psi1, V_.H * S_.current_/P_.sc_, P_.bet_, S_.Iadap_ini_, S_.Idep_ini_, t0_val, v_ini, S_.r_ref_, V_.vrm);
++		    S_.Iadap_ini_ = Iadap(t_final, P_.delta1_, V_.psi1, V_.H * S_.current_/P_.sc_, P_.bet_, S_.Iadap_ini_, S_.Idep_ini_, t0_val, v_ini, S_.r_ref_);
++		    S_.Idep_ini_ = Idep(t_final, P_.bet_, S_.Idep_ini_, t0_val, S_.r_ref_);
++		  }
++		if (v_ini*V_.Vconvfact < -90)
++		  {
++		    v_ini = set_v_ini(-90/V_.Vconvfact, S_.r_ref_, V_.vrm);
++		    S_.Iadap_ini_ = 0;
++		  }
++		V_.out.push_back(v_ini);
++	      }
++	    // t_out.append(t_final);
++	    // Iada.append(S_.Iadap_ini_);
++	    // Ide.append(S_.Idep_ini_);
++	    if (P_.corrcostatratti_)
++	      {
++		// std::cout << "817 corrcostatratti_\n";
++		if (S_.current_ > P_.ith_)
++		  {
++		    if (corpre < P_.ith_) // || i == 0)
++		      {
++			// std::cout << "822 cor > P_.ith_ " << S_.current_ << "," << P_.ith_ << "\n";
++			S_.init_sign_ = t_final;
++			S_.Idep_ini_ = P_.cost_idep_ini_*(S_.current_-P_.ith_);
++			S_.Iadap_ini_ = 0;
++		      }
++
++		    if (corpre > P_.ith_ && corpre < S_.current_)
++		      {
++			S_.init_sign_ = S_.init_sign_*(1+(corpre-P_.ith_)/corpre);
++			S_.Idep_ini_ = P_.cost_idep_ini_*(S_.current_-P_.ith_);
++			S_.Iadap_ini_ = 0;
++		      }
++		  }
++	      }
++	    if (P_.corrcost_)
++	      {
++		if (S_.current_ > P_.ith_)
++		  {
++		    if (corpre < P_.ith_) // || i == 0)
++		      {
++			S_.init_sign_ = t_final;
++			S_.Idep_ini_ = P_.cost_idep_ini_*(S_.current_-P_.ith_);
++			S_.Iadap_ini_ = 0;
++		      }
++		  }
++	      }
++	    //	    vini_prec = v_ini;
++	  }
++	// i = i + 1;
++	// t0_val = t_final;
++	// t_final = t0_val+V_.dt;
++
++	S_.V_m_ = v_ini * V_.Vconvfact;
++	// std::cout << "655 S_.v_ v_ini final " <<   S_.v_ << " Iadap_ini_ " << S_.Iadap_ini_ << "\n";
++    
++	while (V_.out.size() > 3)
++	  {
++	    V_.out.erase(V_.out.begin());
++	  }
++	// lower bound of membrane potential
++	S_.V_m_ = ( S_.V_m_ < P_.V_min_ ? P_.V_min_ : S_.V_m_ );
++	// std::cout << "665 S_.v_ v_ini lower bound " <<   S_.V_m_ << "\n";
++
++	// Count down for refractory period
++	if (S_.r_ref_ > 0) {--S_.r_ref_;}
++    
++	// threshold crossing
++	if ( S_.V_m_ > P_.V_th_ )  // V_th_ = -52
++	  {
++	    S_.r_ref_ = V_.RefractoryCounts_; // Inizialize refractory
++	    V_.t_spk = t_final*V_.time_scale_;
++	    // f.write(str(round(V_.t_spk, 3)) + ' \n')
++	    S_.V_m_ = V_.vrm * V_.Vconvfact; // -65
++
++	    // print('^*spike^*')
++	    // print('t ', t_final, 'val_ist V', V_m_ * V_.Vconvfact, 'adap',
++	    //       S_.Iadap_ini_, 'adap', S_.Iadap_ini_, 't_ini', S_.init_sign_)
++	    // print('^^^^^^')
++	    c_aux = P_.c_;
++	    if (S_.current_ < P_.istim_min_spikinig_exp_ || S_.current_ > P_.istim_max_spikinig_exp_)
++	      {
++		if (P_.corrcost_ or P_.corrcostatratti_)
++		  {
++		  // check solo al primo spike
++		  if (P_.firstSpikeFlag_ == false or corpre != S_.current_)
++		    {
++		      P_.firstSpikeFlag_ = true;
++		      paramL_ = monod((t_final-S_.init_sign_)*V_.time_scale_,P_.a_,P_.b_*S_.current_/1000,P_.c_,P_.alp_);
++		      if (paramL_ < 0)
++			{
++			  // print('monod negativa, paramL: '+str(paramL));
++			  if (P_.a_ > 0)
++			    {
++			      //c*
++			      c_aux = P_.c_ - paramL_;
++			      // print(c_aux)
++			    }
++			  else
++			    {
++			      // a<0
++			      // c**
++			      c_aux = -P_.a_* exp(P_.b_ * S_.current_/1000);
++			      // print(c_aux)
++			    }
++			}
++		      else
++			{
++			  c_aux = P_.c_;
++			}
++		    }
++		  S_.Iadap_ini_ = monod((t_final-S_.init_sign_) * V_.time_scale_, P_.a_, P_.b_ * S_.current_/1000, c_aux, P_.alp_);
++		  }
++		else
++		  {
++		    // sinapt
++		    c_aux = P_.c_;
++		    S_.Iadap_ini_ = monod((t_final-S_.init_sign_) *
++					  V_.time_scale_, P_.a_, P_.b_ * S_.current_/1000, c_aux, P_.alp_);
++		  }
++	      }
++	    else
++	      {
++		// std::cout << "899 Monod\n";
++		S_.Iadap_ini_ = monod((t_final-S_.init_sign_) * V_.time_scale_, P_.a_, P_.b_*S_.current_/1000, P_.c_, P_.alp_);
++		if (S_.Iadap_ini_<0)
++		  {
++		    // print('monod negativa');
++		    if (P_.firstSpikeFlag_ == false or corpre!=S_.current_)
++		      {
++			P_.firstSpikeFlag_ = true;
++			paramL_ = monod((t_final-S_.init_sign_)*V_.time_scale_, P_.a_,P_.b_*S_.current_/1000,P_.c_,P_.alp_);
++			//print('paramL: ',paramL)
++		      }
++		    if (S_.counter_<2)
++		      {
++			//print('monod a zero - ',S_.counter_)
++			S_.Iadap_ini_ = 0;
++			S_.counter_ = S_.counter_ + 1;
++		      }
++		    else if (S_.counter_ == 2)
++		      {
++			c_aux = P_.c_;
++			if (P_.a_ > 0)
++			  {
++			    c_aux = P_.c_ - paramL_;
++			    // print(c_aux)
++			  }
++			else
++			  {
++			    c_aux = -P_.a_* exp(P_.b_ * S_.current_/1000);
++			    // print(c_aux)
++			  }
++			S_.Iadap_ini_ = monod((t_final-S_.init_sign_) * V_.time_scale_, P_.a_, P_.b_ * S_.current_/1000, c_aux, P_.alp_);
++			S_.counter_ = S_.counter_ + 1;
++		      }
++		    else
++		      {
++			// print('S_.counter_ > 3 - c_aux: ',c_aux)
++			S_.Iadap_ini_ = monod((t_final-S_.init_sign_) * V_.time_scale_, P_.a_, P_.b_ * S_.current_/1000, c_aux, P_.alp_);
++			    // print('monod traslata: ',Iadap_ini)
++		      }
++		  }
++	      }
++	    if (S_.current_ < P_.ith_)
++	      {
++		S_.Idep_ini_ = 0;
++		S_.Iadap_ini_ = 0;
++	      }
++	    else
++	      {
++		S_.Idep_ini_ = P_.Idep_ini_vr_;
++	      }
++	    // // Refractory time management
++	    // for (k in range(int(ref_t / V_.d_dt)))
++	    // 	{
++	    // 	  // out.append(V_m_);
++	    // 	  t_final = t_final + V_.dt;
++	    // 	  // t_out.append(t_final);
++	    // 	  // Iada.append(S_.Iadap_ini_);
++	    // 	  // Ide.append(S_.Idep_ini_);
++	    // 	  i = i + 1;
++	    // 	  S_.sis_ = S_.sis_+1;
++	    // 	  if (S_.sis_ >= 2)
++	    // 	    {
++	    // 	      stdcorlastis = ((S_.sis_-2)*stdcorlastis+(S_.sis_-1)*meancorlastis^2 +
++	    // 			      S_.current_^2-S_.sis_*(((S_.sis_-1)*meancorlastis+S_.current_)/S_.sis_)^2)/(S_.sis_-1);
++	    // 	      meancorlastis = ((S_.sis_-1)*meancorlastis+S_.current_)/S_.sis_;
++	    // 	    }
++	    // 	  else
++	    // 	    {
++	    // 	      stdcorlastis = 0;
++	    // 	      meancorlastis = S_.current_;
++	    // 	    }
++	    // 	}
++	    
++	    // compute spike time
++	    set_spiketime( Time::step( origin.get_steps() + lag + 1 ) );
++	    
++	    SpikeEvent se;
++	    kernel().event_delivery_manager.send( *this, se, lag );
++	  }
++	vini_prec = v_ini;
++
++	// std::cout << "782 S_.V_m_ v_ini " <<   S_.V_m_ << " Iadap_ini_ " << S_.Iadap_ini_ << "\n";
++	// voltage logging
++	B_.logger_.record_data( origin.get_steps() + lag );
++      }
++  }
++  
++  port
++  nest::migliore::handles_test_event( SpikeEvent&, rport receptor_type )
++  {
++    // std::cout << "Test event.\n";
++    if ( receptor_type <= 0 || receptor_type > static_cast< port >( P_.n_receptors_() ) )
++      {
++	throw IncompatibleReceptorType( receptor_type, get_name(), "SpikeEvent" );
++      }
++
++    P_.has_connections_ = true;
++    return receptor_type;
++  }
++
++  void
++  nest::migliore::handle( SpikeEvent& e )
++  {
++    assert( e.get_delay_steps() > 0 );
++    // std::cout << "spikes " << B_.spikes_.size() << "\n";
++    // std::cout << "port " << e.get_rport() << "\n";
++    B_.spikes_[ e.get_rport() - 1 ].add_value(
++					      e.get_rel_delivery_steps( kernel().simulation_manager.get_slice_origin() ), e.get_weight() * e.get_multiplicity() );
++    // std::cout << "spikes after" << B_.spikes_.size() << "\n";
++  //    B_.spikes_.add_value(
++    //			 e.get_rel_delivery_steps( kernel().simulation_manager.get_slice_origin() ), e.get_weight() * e.get_multiplicity() );
++  }
++
++  void
++  nest::migliore::handle( CurrentEvent& e )
++  {
++    assert( e.get_delay_steps() > 0 );
++
++    const double c = e.get_current();
++    const double w = e.get_weight();
++    B_.currents_.add_value( e.get_rel_delivery_steps( kernel().simulation_manager.get_slice_origin() ), w * c );
++  }
++
++  void
++  nest::migliore::handle( DataLoggingRequest& e )
++  {
++    B_.logger_.handle( e );
++  }
++
++} // namespace
+diff --git a/models/migliore.h b/models/migliore.h
+new file mode 100644
+index 000000000..66cf86f25
+--- /dev/null
++++ b/models/migliore.h
+@@ -0,0 +1,499 @@
++/*
++ *  migliore.h
++ *
++ *  This file is part of NEST.
++ *
++ *  Copyright (C) 2004 The NEST Initiative
++ *
++ *  NEST is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, either version 2 of the License, or
++ *  (at your option) any later version.
++ *
++ *  NEST is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ *  GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License
++ *  along with NEST.  If not, see <http://www.gnu.org/licenses/>.
++ *
++ */
++
++#ifndef MIGLIORE_H
++#define MIGLIORE_H
++
++// Includes from nestkernel:
++#include "archiving_node.h"
++#include "connection.h"
++#include "event.h"
++#include "nest_types.h"
++#include "recordables_map.h"
++#include "ring_buffer.h"
++#include "universal_data_logger.h"
++
++namespace nest
++{
++
++/* BeginUserDocs: neuron, integrate-and-fire
++
++Short description
+++++++++++++++++++
++
++Migliore neuron model
++
++Description
+++++++++++++
++
++Implementation of the spiking neuron model introduced by Migliore
++[1]_. The dynamics are given by:
++
++.. math::
++
++   dV_m/dt &= 0.04 V_m^2 + 5 V_m + 140 - u + I
++   du/dt &= a (b V_m - u)
++
++
++.. math::
++
++   &\text{if}\;\;\; V_m \geq V_{th}:\\
++   &\;\;\;\; V_m \text{ is set to } c\\
++   &\;\;\;\; u \text{ is incremented by } d\\
++   & \, \\
++   &v \text{ jumps on each spike arrival by the weight of the spike}
++
++As published in [1]_, the numerics differs from the standard forward Euler
++technique in two ways:
++
++1) the new value of :math:`u` is calculated based on the new value of
++   :math:`V_m`, rather than the previous value
++2) the variable :math:`V_m` is updated using a time step half the size of that
++   used to update variable :math:`u`.
++
++This model offers both forms of integration, they can be selected using the
++boolean parameter ``consistent_integration``. To reproduce some results
++published on the basis of this model, it is necessary to use the published form
++of the dynamics. In this case, ``consistent_integration`` must be set to false.
++For all other purposes, it is recommended to use the standard technique for
++forward Euler integration. In this case, ``consistent_integration`` must be set
++to true (default).
++
++For a detailed analysis and discussion of the numerical issues in the original publication, see [2]_.
++
++Parameters
++++++++++++
++
++The following parameters can be set in the status dictionary.
++
++======================= =======  ==============================================
++ V_m                    mV       Membrane potential
++ U_m                    mV       Membrane potential recovery variable
++ V_th                   mV       Spike threshold
++ I_e                    pA       Constant input current (R=1)
++ V_min                  mV       Absolute lower value for the membrane potential
++ a                      real     Describes time scale of recovery variable
++ b                      real     Sensitivity of recovery variable
++ c                      mV       After-spike reset value of V_m
++ d                      mV       After-spike reset value of U_m
++ consistent_integration boolean  Use standard integration technique
++======================= =======  ==============================================
++
++References
++++++++++++
++
++.. [1] Izhikevich EM. (2003). Simple model of spiking neurons. IEEE Transactions
++       on Neural Networks, 14:1569-1572. DOI: https://doi.org/10.1109/TNN.2003.820440
++
++.. [2] Pauli R, Weidel P, Kunkel S, Morrison A (2018). Reproducing polychronization: A guide to maximizing
++       the reproducibility of spiking network models. Frontiers in Neuroinformatics, 12.
++       DOI: https://www.frontiersin.org/article/10.3389/fninf.2018.00046
++
++Sends
+++++++
++
++SpikeEvent
++
++Receives
++++++++++
++
++SpikeEvent, CurrentEvent, DataLoggingRequest
++
++See also
++++++++++
++
++iaf_psc_delta, mat2_psc_exp
++
++EndUserDocs */
++
++class migliore : public ArchivingNode
++{
++
++public:
++  migliore();
++  migliore( const migliore& );
++
++  /**
++   * Import sets of overloaded virtual functions.
++   * @see Technical Issues / Virtual Functions: Overriding, Overloading, and
++   * Hiding
++   */
++  using Node::handle;
++  using Node::handles_test_event;
++
++  void handle( DataLoggingRequest& );
++  void handle( SpikeEvent& );
++  void handle( CurrentEvent& );
++
++  port handles_test_event( DataLoggingRequest&, rport );
++  port handles_test_event( SpikeEvent&, rport );
++  port handles_test_event( CurrentEvent&, rport );
++
++  port send_test_event( Node&, rport, synindex, bool );
++
++  void get_status( DictionaryDatum& ) const;
++  void set_status( const DictionaryDatum& );
++
++private:
++  // friend class RecordablesMap< migliore >;
++  // friend class UniversalDataLogger< migliore >;
++
++  void init_buffers_();
++  void calibrate();
++
++  double tagliorette(double);
++  double migliV(double, double, double, 
++		double, double, double, 
++		double, double, double,
++		int, double);  
++  double set_v_ini(double, int, double);
++  
++  double Iadap(double, double, double, double,
++		 double, double, double, double,
++	       double, int);
++  double Idep(double, double, double, double, int);
++  double exp_cum(double, double, double);
++  double monod(double, double, double, double, double);
++  
++  void update( Time const&, const long, const long );
++
++  // The next two classes need to be friends to access the State_ class/member
++  friend class DynamicRecordablesMap< migliore >;
++  friend class DynamicUniversalDataLogger< migliore >;
++  friend class DataAccessFunctor< migliore >;
++
++  // ----------------------------------------------------------------
++
++  /**
++   * Independent parameters of the model.
++   */
++  struct Parameters_
++  {
++    double E_L_;
++    double vres_;
++    double vtm_;
++    double Cm_;
++    double ith_;
++    double tao_m_;
++    double sc_;
++    double bet_;
++    double delta1_;
++    double cost_idep_ini_;
++    double Idep_ini_vr_;
++    double psi1_;
++    double a_;
++    double b_;
++    double c_;
++    double alp_;
++    double istim_min_spikinig_exp_;
++    double istim_max_spikinig_exp_;
++    double corrcostatratti_;
++    double corrcost_;
++    double Delta_T; //!< Slope factor in ms
++    bool firstSpikeFlag_;
++    
++    /** External DC current */
++    double I_e_;
++
++    /** Threshold */
++    double V_th_;
++
++    /** Lower bound */
++    double V_min_;
++
++    /** Refractory period in ms. */
++    double t_ref_;
++
++    /** Time constants of synaptic currents in ms. */
++    std::vector< double > tau_syn_;
++
++    // boolean flag which indicates whether the neuron has connections
++    bool has_connections_;
++
++    size_t n_receptors_() const; //!< Returns the size of tau_syn_
++
++    Parameters_(); //!< Sets default parameter values
++
++    void get( DictionaryDatum& ) const;             //!< Store current values in dictionary
++    void set( const DictionaryDatum&, Node* node ); //!< Set values from dicitonary
++  };
++
++  // ----------------------------------------------------------------
++
++  /**
++   * State variables of the model.
++   */
++  struct State_
++  {
++    double V_m_; // membrane potential
++    double init_sign_; // Adaptation state variable
++    double Iadap_ini_; // Adaptation state variable
++    double Idep_ini_; // Adaptation state variable
++    int sis_; // Counter variable
++    int counter_; // Couter variable
++    double I_inj_; // input current
++    double current_; //!< This is the current in a time step.
++    int r_ref_;       //!< Absolute refractory counter (no membrane potential propagation)
++    
++    enum StateVecElems
++    {
++      V_M = 0,
++      I_ve,    // 1
++      I_SYN, // 2
++      Iadap,
++      Idep
++    };
++
++    static const size_t NUMBER_OF_FIXED_STATES_ELEMENTS = I_SYN; // V_M, I
++    static const size_t NUM_STATE_ELEMENTS_PER_RECEPTOR = 1;     // I_SYN
++
++    std::vector< double > i_syn_;
++    /** Accumulate spikes arriving during refractory period, discounted for
++        decay until end of refractory period.
++    */
++    State_(); //!< Default initialization
++
++    void get( DictionaryDatum&, const Parameters_& ) const;
++    void set( const DictionaryDatum&, const Parameters_&, Node* );
++  };
++
++  // ----------------------------------------------------------------
++
++  /**
++   * Buffers of the model.
++   */
++  struct Buffers_
++  {
++    /**
++     * Buffer for recording
++     */
++    Buffers_( migliore& );
++    Buffers_( const Buffers_&, migliore& );
++    //UniversalDataLogger< migliore > logger_;
++
++    /** buffers and sums up incoming spikes/currents */
++    std::vector< RingBuffer > spikes_;
++    RingBuffer currents_;
++
++    //! Logger for all analog data
++    DynamicUniversalDataLogger< migliore > logger_;
++
++  };
++
++  // ----------------------------------------------------------------
++
++  /**
++   * Internal variables of the model.
++   */
++  struct Variables_
++  {
++
++    // time evolution operator
++    std::vector< double > P11_syn_;
++    std::vector< double > P21_syn_;
++    double P20_;
++    double P22_;
++
++    int RefractoryCounts_;
++
++    unsigned int receptor_types_size_;
++    std::vector<double> out;
++    double t_spk;
++    double time_scale_, d_dt, dt, beta2, t_step;
++    double H, Vconvfact, vrm, psi1;
++    // double GG;
++    double C;
++    // double JJ, JJ_1, JJ_2, JJ_3, JJ_4, JJ_5, JJ_6, JJ_7;
++    double VV_1, VV_2, VV_3, VV_4, VV_5, VV_6, VV_7, VV_8, VV_9, VV_10, VV_11, VV_12; 
++    double pdelta;
++    double AA_1, AA_2, AA_3, AA_4, AA_5, AA_6, AA_7, AA_8, AA_9, AA_10, AA_11, AA_12;
++    double DD_1;
++  };
++
++  // Access functions for UniversalDataLogger -----------------------
++
++  //! Read out the membrane potential
++  double
++  get_V_m_() const
++  {
++    return S_.V_m_;
++  }
++  //! Read out the injected current
++  double
++  get_I_inj_() const
++  {
++    return S_.I_inj_;
++  }
++  //! Read out the adaptation variable
++  double
++  get_Iadap_ini_() const
++  {
++    return S_.Iadap_ini_;
++  }
++  //! Read out the adaptation variable
++  double
++  get_Idep_ini_() const
++  {
++    return S_.Idep_ini_;
++  }
++  //! Read out the init_sign_ variable
++  double
++  get_init_sign_() const
++  {
++    return S_.init_sign_;
++  }
++  //! Read out the sis_ variable
++  double
++  get_sis_() const
++  {
++    return S_.sis_;
++  }
++  //! Read out the I_syn variable
++  double
++  get_I_syn_() const
++  {
++    return S_.I_SYN;
++  }
++
++  // ----------------------------------------------------------------
++
++  Parameters_ P_;
++  State_ S_;
++  Variables_ V_;
++  Buffers_ B_;
++
++  //! Mapping of recordables names to access functions
++  DynamicRecordablesMap< migliore > recordablesMap_;
++
++  // Data Access Functor getter
++  DataAccessFunctor< migliore > get_data_access_functor( size_t elem );
++  inline double
++  get_state_element( size_t elem )
++  {
++    if ( elem == State_::V_M )
++    {
++      return S_.V_m_;
++    }
++    else if ( elem == State_::I_ve )
++    {
++      return S_.current_;
++    }
++    else if ( elem == State_::Iadap )
++    {
++      return S_.Iadap_ini_;
++    }
++    else if ( elem == State_::Idep )
++    {
++      return S_.Idep_ini_;
++    }
++    else
++    {
++      return S_.i_syn_[ elem - S_.NUMBER_OF_FIXED_STATES_ELEMENTS ];
++    }
++  };
++
++  // Utility function that inserts the synaptic conductances to the
++  // recordables map
++  Name get_i_syn_name( size_t elem );
++  void insert_current_recordables( size_t first = 0 );
++  // //! Mapping of recordables names to access functions
++  // static RecordablesMap< migliore > recordablesMap_;
++  /** @} */
++};
++
++
++inline size_t
++migliore::Parameters_::n_receptors_() const
++{
++  return tau_syn_.size();
++}
++  
++inline port
++migliore::send_test_event( Node& target, rport receptor_type, synindex, bool )
++{
++  SpikeEvent e;
++  e.set_sender( *this );
++
++  return target.handles_test_event( e, receptor_type );
++}
++
++// inline port
++// migliore::handles_test_event( SpikeEvent&, rport receptor_type )
++// {
++//   if ( receptor_type != 0 )
++//   {
++//     throw UnknownReceptorType( receptor_type, get_name() );
++//   }
++//   return 0;
++// }
++
++inline port
++migliore::handles_test_event( CurrentEvent&, rport receptor_type )
++{
++  if ( receptor_type != 0 )
++  {
++    throw UnknownReceptorType( receptor_type, get_name() );
++  }
++  return 0;
++}
++
++inline port
++migliore::handles_test_event( DataLoggingRequest& dlr, rport receptor_type )
++{
++  if ( receptor_type != 0 )
++  {
++    throw UnknownReceptorType( receptor_type, get_name() );
++  }
++  return B_.logger_.connect_logging_device( dlr, recordablesMap_ );
++}
++
++inline void
++migliore::get_status( DictionaryDatum& d ) const
++{
++  P_.get( d );
++  S_.get( d, P_ );
++  ArchivingNode::get_status( d );
++  ( *d )[ names::recordables ] = recordablesMap_.get_list();
++}
++
++inline void
++migliore::set_status( const DictionaryDatum& d )
++{
++  Parameters_ ptmp = P_;     // temporary copy in case of errors
++  ptmp.set( d, this );       // throws if BadProperty
++  State_ stmp = S_;          // temporary copy in case of errors
++  stmp.set( d, ptmp, this ); // throws if BadProperty
++
++  // We now know that (ptmp, stmp) are consistent. We do not
++  // write them back to (P_, S_) before we are also sure that
++  // the properties to be set in the parent class are internally
++  // consistent.
++  ArchivingNode::set_status( d );
++
++  // if we get here, temporaries contain consistent set of properties
++  P_ = ptmp;
++  S_ = stmp;
++}
++
++} // namesopace nest
++
++#endif /* #ifndef MIGLIORE_H */
+diff --git a/models/modelsmodule.cpp b/models/modelsmodule.cpp
+index 6302f97cd..2138c5770 100644
+--- a/models/modelsmodule.cpp
++++ b/models/modelsmodule.cpp
+@@ -74,6 +74,7 @@
+ #include "iaf_psc_exp_ps.h"
+ #include "iaf_psc_exp_ps_lossless.h"
+ #include "izhikevich.h"
++#include "migliore.h"
+ #include "lin_rate.h"
+ #include "mat2_psc_exp.h"
+ #include "mcculloch_pitts_neuron.h"
+@@ -258,6 +259,7 @@ ModelsModule::init( SLIInterpreter* )
+   kernel().model_manager.register_node_model< ginzburg_neuron >( "ginzburg_neuron" );
+   kernel().model_manager.register_node_model< mcculloch_pitts_neuron >( "mcculloch_pitts_neuron" );
+   kernel().model_manager.register_node_model< izhikevich >( "izhikevich" );
++  kernel().model_manager.register_node_model< migliore >( "migliore" );
+   kernel().model_manager.register_node_model< spike_dilutor >( "spike_dilutor" );
+ 
+   kernel().model_manager.register_node_model< spike_recorder >( "spike_recorder" );
+diff --git a/nestkernel/nest_names.cpp b/nestkernel/nest_names.cpp
+index c0e5f6010..9a9ee1039 100644
+--- a/nestkernel/nest_names.cpp
++++ b/nestkernel/nest_names.cpp
+@@ -283,6 +283,30 @@ const Name mean( "mean" );
+ const Name memory( "memory" );
+ const Name message_times( "messages_times" );
+ const Name messages( "messages" );
++const Name vres( "vres" );
++const Name vtm( "vtm" );
++const Name Cm( "Cm" );
++const Name ith( "ith" );
++const Name tao_m( "tao_m" );
++const Name sc( "sc" );
++const Name bet( "bet" );
++const Name delta1( "delta1" );
++const Name cost_idep_ini( "cost_idep_ini" );
++const Name Idep_ini_vr( "Idep_ini_vr" );
++const Name psi1( "psi1" );
++const Name alp( "alp" );
++const Name istim_min_spikinig_exp( "istim_min_spikinig_exp" );
++const Name istim_max_spikinig_exp( "istim_max_spikinig_exp" );
++const Name corrcostatratti( "corrcostatratti" );
++const Name corrcost( "corrcost" );
++const Name corrsin1( "corrsin1" );
++const Name corrsin2( "corrsin2" );
++const Name init_sign( "init_sign" );
++const Name Iadap_ini( "Iadap_ini" );
++const Name Idep_ini( "Idep_ini" );
++const Name sis( "sis" );
++// const Name sis( "cor" );
++// const Name sis( "cor_old" );
+ const Name min( "min" );
+ const Name min_delay( "min_delay" );
+ const Name min_update_time( "min_update_time" );
+diff --git a/nestkernel/nest_names.h b/nestkernel/nest_names.h
+index 8c14061cf..ae22ac7ca 100644
+--- a/nestkernel/nest_names.h
++++ b/nestkernel/nest_names.h
+@@ -307,6 +307,33 @@ extern const Name mean;
+ extern const Name memory;
+ extern const Name message_times;
+ extern const Name messages;
++extern const Name vres;
++extern const Name vtm;
++extern const Name Cm;
++extern const Name ith;
++extern const Name tao_m;
++extern const Name sc;
++extern const Name bet;
++extern const Name delta1;
++extern const Name cost_idep_ini;
++extern const Name Idep_ini_vr;
++extern const Name psi1;
++extern const Name alp;
++extern const Name istim_min_spikinig_exp;
++extern const Name istim_max_spikinig_exp;
++extern const Name corrcostatratti;
++extern const Name corrcost;
++extern const Name corrsin1;
++extern const Name corrsin2;
++extern const Name corrsin2;
++extern const Name init_sign;
++ 
++extern const Name Iadap_ini;
++extern const Name Idep_ini;
++extern const Name sis;
++/* extern const Name cor; */
++/* extern const Name cor_old; */
++extern const Name cor_old;
+ extern const Name min;
+ extern const Name min_delay;
+ extern const Name min_update_time;

@@ -1,0 +1,97 @@
+<html>
+<p>NEST patch and python files for the model:
+<a href="">
+Addolorata Marasco, Emiliano Spera, Vittorio De
+Falco, Annalisa Iuorio, Carmen Alina Lupascu, Sergio
+Solinas and Michele Migliore. An Adaptive Generalized Leaky
+Integrate-and-Fire model for hippocampal
+CA1 pyramidal neurons and interneurons.</a>
+</p>
+<p>We propose an adaptive generalized leaky integrate-and-fire model,
+for hippocampal CA1 neurons and interneurons, in which the nonlinear
+nature of the firing dynamics was successfully reproduced by linear
+ordinary equations equipped with nonlinear and more realistic initial
+and update conditions after each spike event, which strictly depends
+on the external stimulation current.
+</p>
+<p>Dependencies and installation instructions: follow instructions below.<br/>
+</p>
+<p>In order to reproduce Fig. 7 and 8 of the paper run:<br/>
+python -i Fig7_ModelDB.py<br/>
+or<br/>
+python -i Fig8_ModelDB.py
+</p>
+<p>To reproduce the same figures with the NEST model run:<br/>
+  python -i Fig7_ModelDB_nest.py<br/>
+  or<br/>
+  python -i Fig8_ModelDB_nest.py<br/>
+</p>
+<p>
+  The scripts will produce the following images:<br/>
+  Fig7 from python code<br/>
+  <img src="Model_traces_for_constant_current_injections.png" alt="Figure 7">
+</p>
+<p>
+  Fig8 from python code<br/>
+  <img src="Model_traces_for_piecewise_currents.png" alt="Figure 8">
+</p>
+<p>
+  Fig7  from python-NEST code<br/>
+  <img src="Model_traces_for_constant_current_injections_NEST.png" alt="Figure 7 NEST">
+</p>
+<p>
+  Fig8  from python-nest code<br/>
+  <img src="Model_traces_for_piecewise_currents_nest.png" alt="Figure 8">
+</p>
+<p>Under Ubuntu unix systems:<br/>
+  install cmake and build-essential:<br/>
+  sudo apt install cmake<br/>
+  sudo apt-get install build-essential<br/>
+
+  install anaconda3 follwoing instructions from:<br/>
+  ...<br/>
+<p>
+
+</p>Create a Conda Enviroment following instructions at https://github.com/nest/nest-simulator/blob/master/environment.yml
+  OR<br/>
+  create a conda environment:<br/>
+  conda create -n nest python=3.9<br/>
+  conda activate nest<br/>
+<br/>
+  install the following packages:<br/>
+  conda install -c anaconda numpy<br/>
+  conda install -c forge matplotlib<br/>
+  conda install -c conda-forge openmpi<br/>
+  conda install -c anaconda gsl<br/>
+  conda install -c anaconda cython<br/>
+<br/>
+  to compile the NEST simulator with our AGLIF model:<br/>
+  download the correct nest version using:<br/>
+  git clone https://github.com/nest/nest-simulator.git<br/>
+  git fetch<br/>
+  git checkout 01f6e5a763906a3b7cf6713b887366af7bc20a44<br/>
+<br/>
+  Apply the patch:<br/>
+  git apply AGLIF_model_nest.patch<br/>
+<br/>
+  mkdir ../nest-build<br/>
+  cd ../nest-build<br/>
+  cmake ../nest-simulator<br/>
+  make<br/>
+  make install<br/>
+</p>
+
+<p>Questions on how to use this model<br/>
+should be directed to michele.migliore at pa.ibf.cnr.it<br/>
+Questions on how to modifiy or run this<br/>
+model should be addressed to smgsolinas at uniss.it<br/>
+</p>
+
+</body>
+</html>
+
+
+
+
+
+
